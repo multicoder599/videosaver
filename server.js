@@ -214,7 +214,6 @@ async function processVideo(client, message) {
     await fs.unlink(wmPath).catch(() => {});
   }
 }
-
 /* ==================== MAIN ==================== */
 (async () => {
   await ensureDirs();
@@ -243,20 +242,20 @@ async function processVideo(client, message) {
   await client.start({ phoneNumber: async () => {} });
   console.log('🔐 Userbot connected');
   
-  // 🛑 FIX 1: Fetch and cache all channels so GramJS knows who is sending the videos
   console.log('📚 Fetching dialogs to cache channel entities (This may take 5-10 seconds)...');
   await client.getDialogs({}); 
   
   console.log(`🎯 Target: ${CONFIG.targetChannel}`);
   console.log(`📝 Watermark: "${CONFIG.watermarkText}"`);
   console.log(`📋 Sources: ${CONFIG.sourceChannels.length ? CONFIG.sourceChannels.join(', ') : 'ALL joined channels and groups'}`);
-  console.log('📡 Listening for INCOMING videos only...\n');
+  console.log('📡 Listening for videos...\n'); // Updated log message
 
   client.addEventHandler(async (event) => {
     const msg = event.message;
     if (!msg) return;
 
-    if (msg.out) return; // Ignore your own uploads
+    // 🛑 This safely ignores your own uploads, so we don't need {incoming: true} below
+    if (msg.out) return; 
 
     const isVideo = !!msg.video || (msg.document && msg.document.mimeType?.startsWith('video/'));
     if (!isVideo) return;
@@ -282,10 +281,12 @@ async function processVideo(client, message) {
 
     queue.push({ message: msg });
     runQueue(client); 
-  }, new NewMessage({ incoming: true })); 
+    
+  // 🛑 FIX: Removed { incoming: true } so it can hear channel broadcasts again
+  }, new NewMessage({})); 
 })();
 
-// 🛑 FIX 2: Admin Web Server for checking queue status
+// ==================== ADMIN WEB SERVER ====================
 const PORT = 3015;
 const server = http.createServer((req, res) => {
   if (req.url === '/status') {
