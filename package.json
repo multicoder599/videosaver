@@ -1,0 +1,14 @@
+{
+  "name": "telegram-video-watermarker",
+  "version": "1.0.0",
+  "description": "Auto-download, watermark, and forward videos from joined channels",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "login": "node login.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "telegram": "^2.25.11"
+  }
+}
