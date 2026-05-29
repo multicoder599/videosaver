@@ -41,8 +41,7 @@ async function checkFfmpeg() {
     console.log('✅ FFmpeg detected');
   } catch {
     console.error('❌ FFmpeg not found. Install it:');
-    console.error('   Windows: winget install Gyan.FFmpeg');
-    console.error('   Ubuntu:  sudo apt update && sudo apt install ffmpeg -y');
+    console.error('   Ubuntu: sudo apt update && sudo apt install ffmpeg -y');
     process.exit(1);
   }
 }
@@ -56,33 +55,18 @@ async function getFontPath() {
       console.warn(`⚠️ Font not found at ${CONFIG.watermarkFontPath}, trying defaults...`);
     }
   }
-
-  const candidates =
-    process.platform === 'win32'
-      ? [
-          'C:/Windows/Fonts/arial.ttf',
-          'C:/Windows/Fonts/segoeui.ttf',
-          'C:/Windows/Fonts/calibri.ttf',
-        ]
-      : [
-          '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
-          '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
-          '/usr/share/fonts/truetype/freefont/FreeSansBold.ttf',
-        ];
-
+  const candidates = [
+    '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+    '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
+    '/usr/share/fonts/truetype/freefont/FreeSansBold.ttf',
+  ];
   for (const p of candidates) {
     try {
       await fs.access(p);
       return p;
     } catch {}
   }
-
-  throw new Error(
-    'No suitable font found for watermarking.\n' +
-    'Windows: use a .ttf in C:/Windows/Fonts/\n' +
-    'Ubuntu:  sudo apt install fonts-dejavu-core\n' +
-    'Or set WATERMARK_FONT_PATH in .env'
-  );
+  throw new Error('No font found. Run: sudo apt install fonts-dejavu-core');
 }
 
 /* ==================== WATERMARK ==================== */
@@ -92,7 +76,6 @@ async function addWatermark(inputPath, outputPath) {
   await fs.copyFile(originalFont, tempFont);
 
   const text = CONFIG.watermarkText;
-
   const safeText = text
     .replace(/\\/g, '\\\\')
     .replace(/:/g, '\\:')
@@ -127,19 +110,11 @@ async function addWatermark(inputPath, outputPath) {
   return new Promise((resolve, reject) => {
     const proc = spawn('ffmpeg', args, { stdio: 'pipe' });
     let stderr = '';
-
-    proc.stderr.on('data', (data) => {
-      stderr += data.toString();
-    });
-
+    proc.stderr.on('data', (data) => { stderr += data.toString(); });
     proc.on('close', (code) => {
-      if (code === 0) {
-        resolve();
-      } else {
-        reject(new Error(`FFmpeg exited with code ${code}\n${stderr}`));
-      }
+      if (code === 0) resolve();
+      else reject(new Error(`FFmpeg exited ${code}\n${stderr}`));
     });
-
     proc.on('error', (err) => reject(err));
   });
 }
@@ -151,11 +126,8 @@ let busy = false;
 async function runQueue(client) {
   if (busy || queue.length === 0) return;
   busy = true;
-
   const queueSize = queue.length;
-  if (queueSize > 0) {
-    console.log(`\n⏳ [Queue status: ${queueSize} video(s) waiting in line]`);
-  }
+  if (queueSize > 0) console.log(`\n⏳ [Queue: ${queueSize} waiting]`);
 
   const { message } = queue.shift();
   try {
@@ -163,7 +135,6 @@ async function runQueue(client) {
   } catch (err) {
     console.error('❌ Job failed:', err.message);
   }
-
   busy = false;
   runQueue(client);
 }
@@ -171,7 +142,7 @@ async function runQueue(client) {
 /* ==================== VIDEO HANDLER ==================== */
 async function processVideo(client, message) {
   const chat = await client.getEntity(message.peerId);
-  const chatTitle = chat.title || 'Channel/Group';
+  const chatTitle = chat.title || 'Channel';
   const chatUser = chat.username ? `@${chat.username}` : '';
 
   console.log(`\n🎬 Video from: ${chatTitle} ${chatUser}`);
@@ -206,12 +177,74 @@ async function processVideo(client, message) {
       caption,
       forceDocument: false,
     });
-    console.log('   Sent successfully!');
+    console.log('   Sent!');
 
   } finally {
-    console.log('🧹 Sweeping up temporary files to save space...');
     await fs.unlink(origPath).catch(() => {});
     await fs.unlink(wmPath).catch(() => {});
+  }
+}
+
+/* ==================== POLLING (Bulletproof Fallback) ==================== */
+const processedIds = new Set();
+const PROCESSED_FILE = path.join(__dirname, 'processed.json');
+
+async function loadProcessed() {
+  try {
+    const data = await fs.readFile(PROCESSED_FILE, 'utf8');
+    JSON.parse(data).forEach(id => processedIds.add(id));
+    console.log(`🗂️  Loaded ${processedIds.size} previously processed message IDs`);
+  } catch {
+    console.log('🗂️  No processed history found, starting fresh');
+  }
+}
+
+async function saveProcessed() {
+  await fs.writeFile(PROCESSED_FILE, JSON.stringify([...processedIds]));
+}
+
+async function pollChannels(client) {
+  try {
+    const dialogs = await client.getDialogs({ limit: 200 });
+    const now = Date.now() / 1000;
+
+    for (const dialog of dialogs) {
+      if (!dialog.isChannel && !dialog.isGroup) continue;
+
+      const chat = dialog.entity;
+      const uname = (chat.username || '').toLowerCase();
+      const cid = chat.id?.toString() || '';
+      const shortId = cid.replace(/^-100/, '');
+
+      // Source filter
+      if (CONFIG.sourceChannels.length > 0) {
+        const match = CONFIG.sourceChannels.some(
+          (s) => uname === s || cid === s || shortId === s
+        );
+        if (!match) continue;
+      }
+
+      // Get last 5 messages
+      const messages = await client.getMessages(chat, { limit: 5 });
+      for (const msg of messages) {
+        if (processedIds.has(msg.id)) continue;
+        if (now - msg.date > 300) continue; // Skip messages older than 5 minutes
+
+        const isVideo = !!msg.video || (msg.document && msg.document?.mimeType?.startsWith('video/'));
+        if (!isVideo) {
+          processedIds.add(msg.id); // Mark non-videos as processed too
+          continue;
+        }
+
+        console.log(`[POLL] Found new video #${msg.id} in ${chat.title || uname}`);
+        processedIds.add(msg.id);
+        queue.push({ message: msg });
+        runQueue(client);
+      }
+    }
+    await saveProcessed();
+  } catch (err) {
+    console.error('[POLL ERROR]', err.message);
   }
 }
 
@@ -219,13 +252,14 @@ async function processVideo(client, message) {
 (async () => {
   await ensureDirs();
   await checkFfmpeg();
+  await loadProcessed();
 
   if (!CONFIG.apiId || !CONFIG.apiHash) {
     console.error('❌ API_ID and API_HASH required');
     process.exit(1);
   }
   if (!CONFIG.sessionString) {
-    console.error('❌ SESSION_STRING missing. Run: npm run login');
+    console.error('❌ SESSION_STRING missing');
     process.exit(1);
   }
   if (!CONFIG.targetChannel) {
@@ -243,86 +277,57 @@ async function processVideo(client, message) {
   await client.start({ phoneNumber: async () => {} });
   console.log('🔐 Userbot connected');
 
-  // Cache dialogs so getEntity works for channels
-  console.log('📚 Fetching dialogs to cache channel entities...');
+  // Cache dialogs
   await client.getDialogs({});
 
   console.log(`🎯 Target: ${CONFIG.targetChannel}`);
   console.log(`📝 Watermark: "${CONFIG.watermarkText}"`);
-  console.log(`📋 Sources: ${CONFIG.sourceChannels.length ? CONFIG.sourceChannels.join(', ') : 'ALL joined channels and groups'}`);
-  console.log('📡 Listening for ALL new messages (including channels)...\n');
+  console.log(`📋 Sources: ${CONFIG.sourceChannels.length ? CONFIG.sourceChannels.join(', ') : 'ALL channels/groups'}`);
+  console.log('📡 Listening...\n');
 
+  /* ---- EVENT HANDLER (real-time) ---- */
   client.addEventHandler(async (event) => {
     const msg = event.message;
     if (!msg) return;
-
-    // DEBUG: log every message we see
-    const chat = await client.getEntity(msg.peerId).catch(() => null);
-    const chatName = chat?.title || chat?.username || 'Unknown';
-    const isVideo = !!msg.video || (msg.document && msg.document?.mimeType?.startsWith('video/'));
-    const peerType = msg.peerId?.className || 'Unknown';
-
-    if (isVideo) {
-      console.log(`[DEBUG] Video detected in ${chatName} (peer: ${peerType}, msgId: ${msg.id})`);
-    }
-
-    // Ignore outgoing (your own uploads)
     if (msg.out) return;
 
-    // Must be video
+    const isVideo = !!msg.video || (msg.document && msg.document?.mimeType?.startsWith('video/'));
     if (!isVideo) return;
 
-    // Must be channel or group
-    if (peerType !== 'PeerChannel' && peerType !== 'PeerChat') {
-      console.log(`[DEBUG] Skipping: peer type is ${peerType}, not PeerChannel/PeerChat`);
-      return;
-    }
+    const peerType = msg.peerId?.className;
+    if (peerType !== 'PeerChannel' && peerType !== 'PeerChat') return;
 
-    // Optional source filter
-    if (CONFIG.sourceChannels.length > 0) {
-      try {
-        const uname = (chat?.username || '').toLowerCase();
-        const cid = chat?.id?.toString() || '';
-        const shortId = cid.replace(/^-100/, '');
-        const shortChatId = cid.replace(/^-/, '');
+    if (processedIds.has(msg.id)) return;
+    processedIds.add(msg.id);
 
-        const match = CONFIG.sourceChannels.some(
-          (s) => uname === s || cid === s || shortId === s || shortChatId === s
-        );
-        if (!match) {
-          console.log(`[DEBUG] Channel ${chatName} not in SOURCE_CHANNELS, skipping`);
-          return;
-        }
-      } catch {
-        return;
-      }
-    }
-
-    console.log(`[DEBUG] ✅ Queuing video from ${chatName}`);
+    console.log(`[EVENT] Real-time video #${msg.id} from ${peerType}`);
     queue.push({ message: msg });
     runQueue(client);
-  }, new NewMessage({})); // ← FIXED: removed { incoming: true }
+  }, new NewMessage({}));
 
-  // Admin status server
+  /* ---- POLLING HANDLER (every 30s, catches missed events) ---- */
+  console.log('⏰ Starting polling fallback (30s interval)...');
+  setInterval(() => pollChannels(client), 30000);
+  pollChannels(client); // Run immediately on start
+
+  /* ---- ADMIN SERVER ---- */
   const PORT = 3015;
   const server = http.createServer((req, res) => {
     if (req.url === '/status') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
-        status: 'Online and Listening',
+        status: 'Online',
         queueSize: queue.length,
         isProcessing: busy,
-        listeningTo: CONFIG.sourceChannels.length > 0
-          ? CONFIG.sourceChannels
-          : 'ALL joined channels and groups'
+        processedCount: processedIds.size,
+        sources: CONFIG.sourceChannels.length > 0 ? CONFIG.sourceChannels : 'ALL'
       }, null, 2));
     } else {
       res.writeHead(404);
       res.end('Not Found');
     }
   });
-
   server.listen(PORT, () => {
-    console.log(`🌐 Admin server running at http://localhost:${PORT}/status`);
+    console.log(`🌐 Admin: curl http://localhost:${PORT}/status`);
   });
 })();
