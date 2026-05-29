@@ -112,6 +112,7 @@ async function addWatermark(inputPath, outputPath) {
     `bordercolor=black:` +
     `x=(w-tw)/2:` +    // Centers horizontally
     `y=(h-th)/2`;      // Centers vertically
+    
   const args = [
     '-i', inputPath,
     '-vf', filter,
@@ -170,7 +171,7 @@ async function runQueue(client) {
 /* ==================== VIDEO HANDLER ==================== */
 async function processVideo(client, message) {
   const chat = await client.getEntity(message.peerId);
-  const chatTitle = chat.title || 'Channel';
+  const chatTitle = chat.title || 'Channel/Group';
   const chatUser = chat.username ? `@${chat.username}` : '';
 
   console.log(`\n🎬 Video from: ${chatTitle} ${chatUser}`);
@@ -247,7 +248,7 @@ async function processVideo(client, message) {
   console.log('🔐 Userbot connected');
   console.log(`🎯 Target: ${CONFIG.targetChannel}`);
   console.log(`📝 Watermark: "${CONFIG.watermarkText}"`);
-  console.log(`📋 Sources: ${CONFIG.sourceChannels.length ? CONFIG.sourceChannels.join(', ') : 'ALL joined channels'}`);
+  console.log(`📋 Sources: ${CONFIG.sourceChannels.length ? CONFIG.sourceChannels.join(', ') : 'ALL joined channels and groups'}`);
   console.log('📡 Listening...\n');
 
   client.addEventHandler(async (event) => {
@@ -257,24 +258,27 @@ async function processVideo(client, message) {
     const isVideo = !!msg.video || (msg.document && msg.document.mimeType?.startsWith('video/'));
     if (!isVideo) return;
 
-    if (msg.peerId?.className !== 'PeerChannel') return;
+    // FIX: Allow BOTH Channels/Supergroups and Standard Groups
+    if (msg.peerId?.className !== 'PeerChannel' && msg.peerId?.className !== 'PeerChat') return;
 
     if (CONFIG.sourceChannels.length > 0) {
       try {
         const chat = await client.getEntity(msg.peerId);
         const uname = (chat.username || '').toLowerCase();
         const cid = chat.id?.toString() || '';
-        const shortId = cid.replace(/^-100/, '');
+        const shortId = cid.replace(/^-100/, ''); // Channels usually start with -100
+        const shortChatId = cid.replace(/^-/, ''); // Standard groups usually start with -
+
         const match = CONFIG.sourceChannels.some(
-          (s) => uname === s || cid === s || shortId === s
+          (s) => uname === s || cid === s || shortId === s || shortChatId === s
         );
-        if (!match) return;
+        if (!match) return; // If it doesn't match the .env list, ignore it
       } catch {
         return;
       }
     }
 
     queue.push({ message: msg });
-    runQueue(client); // Try to run queue, will skip if already busy
+    runQueue(client); 
   }, new NewMessage({}));
 })();
