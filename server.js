@@ -5,6 +5,7 @@ const { NewMessage } = require('telegram/events');
 const fs = require('fs').promises;
 const path = require('path');
 const { spawn } = require('child_process');
+const http = require('http'); // Added for the curl admin server
 
 /* ==================== CONFIG ==================== */
 const CONFIG = {
@@ -241,18 +242,21 @@ async function processVideo(client, message) {
 
   await client.start({ phoneNumber: async () => {} });
   console.log('🔐 Userbot connected');
+  
+  // 🛑 FIX 1: Fetch and cache all channels so GramJS knows who is sending the videos
+  console.log('📚 Fetching dialogs to cache channel entities (This may take 5-10 seconds)...');
+  await client.getDialogs({}); 
+  
   console.log(`🎯 Target: ${CONFIG.targetChannel}`);
   console.log(`📝 Watermark: "${CONFIG.watermarkText}"`);
   console.log(`📋 Sources: ${CONFIG.sourceChannels.length ? CONFIG.sourceChannels.join(', ') : 'ALL joined channels and groups'}`);
   console.log('📡 Listening for INCOMING videos only...\n');
 
-  // NEW: Explicitly set incoming: true to prevent triggering on your own actions
   client.addEventHandler(async (event) => {
     const msg = event.message;
     if (!msg) return;
 
-    // 🛑 NEW FIX: Double-check to ignore any messages sent by YOU
-    if (msg.out) return;
+    if (msg.out) return; // Ignore your own uploads
 
     const isVideo = !!msg.video || (msg.document && msg.document.mimeType?.startsWith('video/'));
     if (!isVideo) return;
@@ -278,5 +282,28 @@ async function processVideo(client, message) {
 
     queue.push({ message: msg });
     runQueue(client); 
-  }, new NewMessage({ incoming: true })); // Added incoming strictly
+  }, new NewMessage({ incoming: true })); 
 })();
+
+// 🛑 FIX 2: Admin Web Server for checking queue status
+const PORT = 3015;
+const server = http.createServer((req, res) => {
+  if (req.url === '/status') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      status: 'Online and Listening',
+      queueSize: queue.length,
+      isProcessing: busy,
+      listeningTo: CONFIG.sourceChannels.length > 0 
+        ? CONFIG.sourceChannels 
+        : 'ALL joined channels and groups (No .env filter applied)'
+    }, null, 2));
+  } else {
+    res.writeHead(404);
+    res.end('Not Found');
+  }
+});
+
+server.listen(PORT, () => {
+  console.log(`🌐 Admin server running! Check status with: curl http://localhost:${PORT}/status`);
+});
