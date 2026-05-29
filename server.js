@@ -20,7 +20,6 @@ const CONFIG = {
   dirs: {
     downloads: path.join(__dirname, 'downloads'),
     temp: path.join(__dirname, 'temp'),
-    // 🗑️ Removed gallery folder to save VPS storage
   },
 };
 
@@ -110,8 +109,8 @@ async function addWatermark(inputPath, outputPath) {
     `fontcolor=white:` +
     `borderw=2:` +
     `bordercolor=black:` +
-    `x=(w-tw)/2:` +    // Centers horizontally
-    `y=(h-th)/2`;      // Centers vertically
+    `x=(w-tw)/2:` +
+    `y=(h-th)/2`;
     
   const args = [
     '-i', inputPath,
@@ -165,7 +164,7 @@ async function runQueue(client) {
   }
   
   busy = false;
-  runQueue(client); // Immediately trigger the next item in the queue
+  runQueue(client);
 }
 
 /* ==================== VIDEO HANDLER ==================== */
@@ -186,7 +185,6 @@ async function processVideo(client, message) {
   const wmPath = path.join(CONFIG.dirs.temp, `${base}_wm${safeExt}`);
 
   try {
-    // 1) Download
     console.log('⬇️  Downloading...');
     const buffer = await client.downloadMedia(message.media, {
       progressCallback: (got, total) => {
@@ -196,12 +194,10 @@ async function processVideo(client, message) {
     await fs.writeFile(origPath, buffer);
     console.log('\n   Downloaded');
 
-    // 2) Watermark
     console.log(`🎨 Watermarking with "${CONFIG.watermarkText}"...`);
     await addWatermark(origPath, wmPath);
     console.log('   Done');
 
-    // 3) Send to your channel
     console.log('📤 Sending to target...');
     const caption = message.text || message.caption || `📹 ${chatTitle}`;
     await client.sendFile(CONFIG.targetChannel, {
@@ -212,7 +208,6 @@ async function processVideo(client, message) {
     console.log('   Sent successfully!');
 
   } finally {
-    // 4) Strict Cleanup (Runs even if something fails)
     console.log('🧹 Sweeping up temporary files to save space...');
     await fs.unlink(origPath).catch(() => {});
     await fs.unlink(wmPath).catch(() => {});
@@ -249,16 +244,19 @@ async function processVideo(client, message) {
   console.log(`🎯 Target: ${CONFIG.targetChannel}`);
   console.log(`📝 Watermark: "${CONFIG.watermarkText}"`);
   console.log(`📋 Sources: ${CONFIG.sourceChannels.length ? CONFIG.sourceChannels.join(', ') : 'ALL joined channels and groups'}`);
-  console.log('📡 Listening...\n');
+  console.log('📡 Listening for INCOMING videos only...\n');
 
+  // NEW: Explicitly set incoming: true to prevent triggering on your own actions
   client.addEventHandler(async (event) => {
     const msg = event.message;
     if (!msg) return;
 
+    // 🛑 NEW FIX: Double-check to ignore any messages sent by YOU
+    if (msg.out) return;
+
     const isVideo = !!msg.video || (msg.document && msg.document.mimeType?.startsWith('video/'));
     if (!isVideo) return;
 
-    // FIX: Allow BOTH Channels/Supergroups and Standard Groups
     if (msg.peerId?.className !== 'PeerChannel' && msg.peerId?.className !== 'PeerChat') return;
 
     if (CONFIG.sourceChannels.length > 0) {
@@ -266,13 +264,13 @@ async function processVideo(client, message) {
         const chat = await client.getEntity(msg.peerId);
         const uname = (chat.username || '').toLowerCase();
         const cid = chat.id?.toString() || '';
-        const shortId = cid.replace(/^-100/, ''); // Channels usually start with -100
-        const shortChatId = cid.replace(/^-/, ''); // Standard groups usually start with -
+        const shortId = cid.replace(/^-100/, '');
+        const shortChatId = cid.replace(/^-/, '');
 
         const match = CONFIG.sourceChannels.some(
           (s) => uname === s || cid === s || shortId === s || shortChatId === s
         );
-        if (!match) return; // If it doesn't match the .env list, ignore it
+        if (!match) return; 
       } catch {
         return;
       }
@@ -280,5 +278,5 @@ async function processVideo(client, message) {
 
     queue.push({ message: msg });
     runQueue(client); 
-  }, new NewMessage({}));
+  }, new NewMessage({ incoming: true })); // Added incoming strictly
 })();
