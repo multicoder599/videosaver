@@ -140,6 +140,11 @@ async function runQueue(client) {
 }
 
 /* ==================== VIDEO HANDLER ==================== */
+function truncateCaption(text, max = 1024) {
+  if (!text) return '';
+  return text.length > max ? text.substring(0, max - 3) + '...' : text;
+}
+
 async function processVideo(client, message) {
   const chat = await client.getEntity(message.peerId);
   const chatTitle = chat.title || 'Channel';
@@ -171,7 +176,8 @@ async function processVideo(client, message) {
     console.log('   Done');
 
     console.log('📤 Sending to target...');
-    const caption = message.text || message.caption || `📹 ${chatTitle}`;
+    const rawCaption = message.text || message.caption || `📹 ${chatTitle}`;
+    const caption = truncateCaption(rawCaption);
     await client.sendFile(CONFIG.targetChannel, {
       file: wmPath,
       caption,
@@ -185,7 +191,7 @@ async function processVideo(client, message) {
   }
 }
 
-/* ==================== POLLING (Bulletproof Fallback) ==================== */
+/* ==================== POLLING ==================== */
 const processedIds = new Set();
 const PROCESSED_FILE = path.join(__dirname, 'processed.json');
 
@@ -193,14 +199,28 @@ async function loadProcessed() {
   try {
     const data = await fs.readFile(PROCESSED_FILE, 'utf8');
     JSON.parse(data).forEach(id => processedIds.add(id));
-    console.log(`🗂️  Loaded ${processedIds.size} previously processed message IDs`);
+    console.log(`🗂️  Loaded ${processedIds.size} previously processed IDs`);
   } catch {
-    console.log('🗂️  No processed history found, starting fresh');
+    console.log('🗂️  No processed history, starting fresh');
   }
 }
 
 async function saveProcessed() {
   await fs.writeFile(PROCESSED_FILE, JSON.stringify([...processedIds]));
+}
+
+function getTargetId() {
+  // Normalize target channel for comparison
+  const t = CONFIG.targetChannel.toLowerCase().replace('@', '');
+  return t;
+}
+
+async function isTargetChannel(chat) {
+  const target = getTargetId();
+  const uname = (chat.username || '').toLowerCase().replace('@', '');
+  const cid = chat.id?.toString() || '';
+  const shortId = cid.replace(/^-100/, '');
+  return uname === target || cid === target || shortId === target;
 }
 
 async function pollChannels(client) {
@@ -212,6 +232,10 @@ async function pollChannels(client) {
       if (!dialog.isChannel && !dialog.isGroup) continue;
 
       const chat = dialog.entity;
+
+      // 🛑 SKIP TARGET CHANNEL — don't process our own output
+      if (await isTargetChannel(chat)) continue;
+
       const uname = (chat.username || '').toLowerCase();
       const cid = chat.id?.toString() || '';
       const shortId = cid.replace(/^-100/, '');
@@ -224,25 +248,27 @@ async function pollChannels(client) {
         if (!match) continue;
       }
 
-      // Get last 5 messages
       const messages = await client.getMessages(chat, { limit: 5 });
       for (const msg of messages) {
         if (processedIds.has(msg.id)) continue;
-        if (now - msg.date > 300) continue; // Skip messages older than 5 minutes
-
-        const isVideo = !!msg.video || (msg.document && msg.document?.mimeType?.startsWith('video/'));
-        if (!isVideo) {
-          processedIds.add(msg.id); // Mark non-videos as processed too
+        if (now - msg.date > 300) {
+          processedIds.add(msg.id); // Mark old as processed so we skip next time
           continue;
         }
 
-        console.log(`[POLL] Found new video #${msg.id} in ${chat.title || uname}`);
+        const isVideo = !!msg.video || (msg.document && msg.document?.mimeType?.startsWith('video/'));
+        if (!isVideo) {
+          processedIds.add(msg.id);
+          continue;
+        }
+
+        console.log(`[POLL] New video #${msg.id} in ${chat.title || uname}`);
         processedIds.add(msg.id);
+        await saveProcessed(); // Persist immediately
         queue.push({ message: msg });
         runQueue(client);
       }
     }
-    await saveProcessed();
   } catch (err) {
     console.error('[POLL ERROR]', err.message);
   }
@@ -276,8 +302,6 @@ async function pollChannels(client) {
 
   await client.start({ phoneNumber: async () => {} });
   console.log('🔐 Userbot connected');
-
-  // Cache dialogs
   await client.getDialogs({});
 
   console.log(`🎯 Target: ${CONFIG.targetChannel}`);
@@ -285,7 +309,7 @@ async function pollChannels(client) {
   console.log(`📋 Sources: ${CONFIG.sourceChannels.length ? CONFIG.sourceChannels.join(', ') : 'ALL channels/groups'}`);
   console.log('📡 Listening...\n');
 
-  /* ---- EVENT HANDLER (real-time) ---- */
+  /* ---- EVENT HANDLER ---- */
   client.addEventHandler(async (event) => {
     const msg = event.message;
     if (!msg) return;
@@ -296,19 +320,25 @@ async function pollChannels(client) {
 
     const peerType = msg.peerId?.className;
     if (peerType !== 'PeerChannel' && peerType !== 'PeerChat') return;
-
     if (processedIds.has(msg.id)) return;
-    processedIds.add(msg.id);
 
-    console.log(`[EVENT] Real-time video #${msg.id} from ${peerType}`);
+    // 🛑 SKIP TARGET CHANNEL
+    try {
+      const chat = await client.getEntity(msg.peerId);
+      if (await isTargetChannel(chat)) return;
+    } catch { return; }
+
+    console.log(`[EVENT] Real-time video #${msg.id}`);
+    processedIds.add(msg.id);
+    await saveProcessed();
     queue.push({ message: msg });
     runQueue(client);
   }, new NewMessage({}));
 
-  /* ---- POLLING HANDLER (every 30s, catches missed events) ---- */
-  console.log('⏰ Starting polling fallback (30s interval)...');
+  /* ---- POLLING ---- */
+  console.log('⏰ Polling every 30s...');
   setInterval(() => pollChannels(client), 30000);
-  pollChannels(client); // Run immediately on start
+  pollChannels(client);
 
   /* ---- ADMIN SERVER ---- */
   const PORT = 3015;
