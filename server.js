@@ -5,7 +5,7 @@ const { NewMessage } = require('telegram/events');
 const fs = require('fs').promises;
 const path = require('path');
 const { spawn } = require('child_process');
-const http = require('http'); // Added for the curl admin server
+const http = require('http');
 
 /* ==================== CONFIG ==================== */
 const CONFIG = {
@@ -112,7 +112,7 @@ async function addWatermark(inputPath, outputPath) {
     `bordercolor=black:` +
     `x=(w-tw)/2:` +
     `y=(h-th)/2`;
-    
+
   const args = [
     '-i', inputPath,
     '-vf', filter,
@@ -151,10 +151,10 @@ let busy = false;
 async function runQueue(client) {
   if (busy || queue.length === 0) return;
   busy = true;
-  
+
   const queueSize = queue.length;
   if (queueSize > 0) {
-      console.log(`\n⏳ [Queue status: ${queueSize} video(s) waiting in line]`);
+    console.log(`\n⏳ [Queue status: ${queueSize} video(s) waiting in line]`);
   }
 
   const { message } = queue.shift();
@@ -163,7 +163,7 @@ async function runQueue(client) {
   } catch (err) {
     console.error('❌ Job failed:', err.message);
   }
-  
+
   busy = false;
   runQueue(client);
 }
@@ -214,6 +214,7 @@ async function processVideo(client, message) {
     await fs.unlink(wmPath).catch(() => {});
   }
 }
+
 /* ==================== MAIN ==================== */
 (async () => {
   await ensureDirs();
@@ -241,70 +242,87 @@ async function processVideo(client, message) {
 
   await client.start({ phoneNumber: async () => {} });
   console.log('🔐 Userbot connected');
-  
-  console.log('📚 Fetching dialogs to cache channel entities (This may take 5-10 seconds)...');
-  await client.getDialogs({}); 
-  
+
+  // Cache dialogs so getEntity works for channels
+  console.log('📚 Fetching dialogs to cache channel entities...');
+  await client.getDialogs({});
+
   console.log(`🎯 Target: ${CONFIG.targetChannel}`);
   console.log(`📝 Watermark: "${CONFIG.watermarkText}"`);
   console.log(`📋 Sources: ${CONFIG.sourceChannels.length ? CONFIG.sourceChannels.join(', ') : 'ALL joined channels and groups'}`);
-  console.log('📡 Listening for videos...\n'); // Updated log message
+  console.log('📡 Listening for ALL new messages (including channels)...\n');
 
   client.addEventHandler(async (event) => {
     const msg = event.message;
     if (!msg) return;
 
-    // 🛑 This safely ignores your own uploads, so we don't need {incoming: true} below
-    if (msg.out) return; 
+    // DEBUG: log every message we see
+    const chat = await client.getEntity(msg.peerId).catch(() => null);
+    const chatName = chat?.title || chat?.username || 'Unknown';
+    const isVideo = !!msg.video || (msg.document && msg.document?.mimeType?.startsWith('video/'));
+    const peerType = msg.peerId?.className || 'Unknown';
 
-    const isVideo = !!msg.video || (msg.document && msg.document.mimeType?.startsWith('video/'));
+    if (isVideo) {
+      console.log(`[DEBUG] Video detected in ${chatName} (peer: ${peerType}, msgId: ${msg.id})`);
+    }
+
+    // Ignore outgoing (your own uploads)
+    if (msg.out) return;
+
+    // Must be video
     if (!isVideo) return;
 
-    if (msg.peerId?.className !== 'PeerChannel' && msg.peerId?.className !== 'PeerChat') return;
+    // Must be channel or group
+    if (peerType !== 'PeerChannel' && peerType !== 'PeerChat') {
+      console.log(`[DEBUG] Skipping: peer type is ${peerType}, not PeerChannel/PeerChat`);
+      return;
+    }
 
+    // Optional source filter
     if (CONFIG.sourceChannels.length > 0) {
       try {
-        const chat = await client.getEntity(msg.peerId);
-        const uname = (chat.username || '').toLowerCase();
-        const cid = chat.id?.toString() || '';
+        const uname = (chat?.username || '').toLowerCase();
+        const cid = chat?.id?.toString() || '';
         const shortId = cid.replace(/^-100/, '');
         const shortChatId = cid.replace(/^-/, '');
 
         const match = CONFIG.sourceChannels.some(
           (s) => uname === s || cid === s || shortId === s || shortChatId === s
         );
-        if (!match) return; 
+        if (!match) {
+          console.log(`[DEBUG] Channel ${chatName} not in SOURCE_CHANNELS, skipping`);
+          return;
+        }
       } catch {
         return;
       }
     }
 
+    console.log(`[DEBUG] ✅ Queuing video from ${chatName}`);
     queue.push({ message: msg });
-    runQueue(client); 
-    
-  // 🛑 FIX: Removed { incoming: true } so it can hear channel broadcasts again
-  }, new NewMessage({})); 
+    runQueue(client);
+  }, new NewMessage({})); // ← FIXED: removed { incoming: true }
+
+  // Admin status server
+  const PORT = 3015;
+  const server = http.createServer((req, res) => {
+    if (req.url === '/status') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        status: 'Online and Listening',
+        queueSize: queue.length,
+        isProcessing: busy,
+        listeningTo: CONFIG.sourceChannels.length > 0
+          ? CONFIG.sourceChannels
+          : 'ALL joined channels and groups'
+      }, null, 2));
+    } else {
+      res.writeHead(404);
+      res.end('Not Found');
+    }
+  });
+
+  server.listen(PORT, () => {
+    console.log(`🌐 Admin server running at http://localhost:${PORT}/status`);
+  });
 })();
-
-// ==================== ADMIN WEB SERVER ====================
-const PORT = 3015;
-const server = http.createServer((req, res) => {
-  if (req.url === '/status') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      status: 'Online and Listening',
-      queueSize: queue.length,
-      isProcessing: busy,
-      listeningTo: CONFIG.sourceChannels.length > 0 
-        ? CONFIG.sourceChannels 
-        : 'ALL joined channels and groups (No .env filter applied)'
-    }, null, 2));
-  } else {
-    res.writeHead(404);
-    res.end('Not Found');
-  }
-});
-
-server.listen(PORT, () => {
-  console.log(`🌐 Admin server running! Check status with: curl http://localhost:${PORT}/status`);
-});
